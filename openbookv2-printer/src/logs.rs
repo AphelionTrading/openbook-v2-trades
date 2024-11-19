@@ -16,10 +16,11 @@ pub struct Trade {
     pub market_id: String,
     pub taker_side: u8,
     pub market_name: String,
+    pub signature: String,
 }
 
 impl Trade {
-    pub fn new(fill_log: &FillLog, market: &Market, market_name: String) -> Trade {
+    pub fn new(fill_log: &FillLog, market: &Market, market_name: String, signature: String) -> Trade {
         let price_hr = price_lots_to_ui(fill_log.price, market);
         // this is correct
         let quantity = to_ui_decimals(
@@ -35,6 +36,7 @@ impl Trade {
             market_id: fill_log.market.to_string(),
             taker_side: fill_log.taker_side,
             market_name,
+            signature,
         }
     }
 }
