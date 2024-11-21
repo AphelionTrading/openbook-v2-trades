@@ -15,6 +15,7 @@ use solana_sdk::signature::Signature;
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use tokio::spawn;
+use tokio::time::sleep;
 use tokio::sync::mpsc::unbounded_channel;
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::geyser::subscribe_update::UpdateOneof;
@@ -131,35 +132,50 @@ async fn main() {
     let discriminator = FillLog::discriminator();
     let request = request.clone();
     spawn(async move {
-        loop {
+        'outer: loop {
             let (_subscribe_tx, mut stream) = grpc_client
                 .subscribe_with_request(Some(request.clone()))
                 .await
                 .unwrap();
-            while let Some(message) = stream.next().await {
-              if let Ok(msg) =  message {
+            loop {
+                let message = stream.next().await;
+                match message {
+                    Some(Ok(msg)) => {
                         debug!("new message: {msg:?}");
-                        # [allow(clippy::single_match)]
-                            match msg.update_oneof {
-                                Some(UpdateOneof::Transaction(tx)) => {
-                                    let tx = tx.transaction.unwrap();
-                                    let logs = tx.meta.unwrap().log_messages;
-                                    for log in logs.iter() {
-                                        if log.contains("Program data: ") {
-                                            let data = log.replace("Program data: ", "");
-                                            let data = base64::decode(data).unwrap();
-                                            if discriminator == data.as_slice()[..8] {
-                                                let signature = Signature::new(&tx.signature).to_string();
-                                                let fill_log = FillLog::deserialize(&mut &data[8..]).unwrap();
-                                                tx_sender.send((fill_log, signature)).unwrap();
-                                            }
+                        #[allow(clippy::single_match)]
+                        match msg.update_oneof {
+                            Some(UpdateOneof::Transaction(tx)) => {
+                                let tx = tx.transaction.unwrap();
+                                let logs = tx.meta.unwrap().log_messages;
+                                for log in logs.iter() {
+                                    if log.contains("Program data: ") {
+                                        let data = log.replace("Program data: ", "");
+                                        let data = base64::decode(data).unwrap();
+                                        if discriminator == data.as_slice()[..8] {
+                                            let signature =
+                                                Signature::new(&tx.signature).to_string();
+                                            let fill_log =
+                                                FillLog::deserialize(&mut &data[8..]).unwrap();
+                                            tx_sender.send((fill_log, signature)).unwrap();
                                         }
                                     }
                                 }
-                                _ => {}
                             }
+                            _ => {}
+                        }
+                    }
+                    Some(Err(e)) => {
+                        error!("Stream error: {:?}. Reconnecting...", e);
+                        sleep(Duration::from_secs(1)).await;
+                        break 'outer; // Exit inner loop to reconnect
+                    }
+                    None => {
+                        warn!("Stream returned None. Restarting connection...");
+                        sleep(Duration::from_secs(1)).await;
+                        break 'outer;
                     }
                 }
+            }
         }
     });
 
