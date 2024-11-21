@@ -168,12 +168,12 @@ async fn main() {
                     Some(Err(e)) => {
                         error!("Stream error: {:?}. Reconnecting...", e);
                         sleep(Duration::from_secs(1)).await;
-                        break 'outer; // Exit inner loop to reconnect
+                        break; // Exit inner loop to reconnect
                     }
                     None => {
                         warn!("Stream returned None. Restarting connection...");
                         sleep(Duration::from_secs(1)).await;
-                        break 'outer;
+                        break
                     }
                 }
             }
