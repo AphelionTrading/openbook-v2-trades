@@ -8,16 +8,17 @@ use futures::StreamExt;
 use log::{debug, error, info, warn, LevelFilter};
 use openbookv2_generated::state::Market;
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_program::clock::UnixTimestamp;
 use solana_program::hash::Hash;
 use solana_program::pubkey::Pubkey;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::signature::Signature;
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::spawn;
-use tokio::time::sleep;
 use tokio::sync::mpsc::unbounded_channel;
+use tokio::time::sleep;
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::geyser::subscribe_update::UpdateOneof;
 use yellowstone_grpc_proto::geyser::CommitmentLevel;
@@ -50,6 +51,8 @@ struct Cli {
     connect: bool,
     #[arg(short, long, default_value = "x-token")]
     x_token: String,
+    #[arg(short, long, default_value_t = 1000)]
+    check: u64,
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -72,6 +75,7 @@ async fn main() {
     }
     let processed_commitment = CommitmentConfig::processed();
     let client = RpcClient::new_with_commitment(cli.rpc_url.clone(), processed_commitment);
+    let client_for_slot = RpcClient::new_with_commitment(cli.rpc_url.clone(), processed_commitment);
     let market_keys = cli
         .market
         .iter()
@@ -133,6 +137,8 @@ async fn main() {
     let discriminator = FillLog::discriminator();
     let request = request.clone();
     spawn(async move {
+        let mut counter = 0;
+        let mut check = cli.check;
         'outer: loop {
             let (_subscribe_tx, mut stream) = grpc_client
                 .subscribe_with_request(Some(request.clone()))
@@ -145,19 +151,44 @@ async fn main() {
                         debug!("new message: {msg:?}");
                         #[allow(clippy::single_match)]
                         match msg.update_oneof {
-                            Some(UpdateOneof::Transaction(tx)) => {
-                                let tx = tx.transaction.unwrap();
+                            Some(UpdateOneof::Transaction(txn)) => {
+                                let tx = txn.transaction.unwrap();
                                 let logs = tx.meta.unwrap().log_messages;
                                 for log in logs.iter() {
                                     if log.contains("Program data: ") {
                                         let data = log.replace("Program data: ", "");
                                         let data = base64::decode(data).unwrap();
                                         if discriminator == data.as_slice()[..8] {
+                                            if counter >= check {
+                                                let time =
+                                                    client_for_slot.get_block_time(txn.slot).await;
+                                                match time {
+                                                    Ok(t) => {
+                                                        let system_t = SystemTime::now()
+                                                            .elapsed()
+                                                            .unwrap()
+                                                            .as_secs();
+                                                        info!(
+                                                            "checking slot: {} lagging: {} s",
+                                                            txn.slot,
+                                                            system_t - t.unsigned_abs()
+                                                        )
+                                                    }
+                                                    Err(err) => {
+                                                        warn!(
+                                                            "during checking slot got: {:?}",
+                                                            err
+                                                        );
+                                                    }
+                                                }
+                                                check = 0;
+                                            }
                                             let signature =
                                                 Signature::new(&tx.signature).to_string();
                                             let fill_log =
                                                 FillLog::deserialize(&mut &data[8..]).unwrap();
                                             tx_sender.send((fill_log, signature)).unwrap();
+                                            counter += 1;
                                         }
                                     }
                                 }
@@ -173,7 +204,7 @@ async fn main() {
                     None => {
                         warn!("Stream returned None. Restarting connection...");
                         sleep(Duration::from_secs(1)).await;
-                        break
+                        break;
                     }
                 }
             }
@@ -209,7 +240,12 @@ async fn main() {
                 }
                 fill_log.taker = maker_owner;
             }
-            let trade = Trade::new(&fill_log, market, market_name.clone().replace('\0', ""), tx_hash.clone());
+            let trade = Trade::new(
+                &fill_log,
+                market,
+                market_name.clone().replace('\0', ""),
+                tx_hash.clone(),
+            );
             let t = serde_json::to_string(&trade).unwrap();
             let r = socket.send(&t, 0);
             match r {
