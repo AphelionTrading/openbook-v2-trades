@@ -15,7 +15,7 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::signature::Signature;
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::spawn;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time::sleep;
@@ -165,7 +165,7 @@ async fn main() {
                                                 match time {
                                                     Ok(t) => {
                                                         let system_t = SystemTime::now()
-                                                            .elapsed()
+                                                            .duration_since(UNIX_EPOCH)
                                                             .unwrap()
                                                             .as_secs();
                                                         info!(
