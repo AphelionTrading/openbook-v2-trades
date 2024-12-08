@@ -47,11 +47,11 @@ struct Cli {
     grpc: String,
     #[clap(value_enum, default_value = "finalized")]
     commitment: Commitment,
-    #[arg(short, long, action)]
+    #[arg(long, action)]
     connect: bool,
     #[arg(short, long, default_value = "x-token")]
     x_token: String,
-    #[arg(short, long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 1000)]
     check: u64,
 }
 
