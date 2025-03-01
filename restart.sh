@@ -1,8 +1,11 @@
-pid=$(ps -ef | grep -v grep | grep "openbookv2-printer" | awk '{print $2}')
-kill -9 $pid
+source ../solana-trading/run/utils.sh
 
-# prompt user for URL
-echo "Enter the RPC URL: "
-read rpc_url
+if [[ "$1" == "--no-kill" ]]; then
+    shift  # Discard the first argument, so $1 will now be the new first argument if there was one
+else
+    kill_process "openbookv2-printer"
+fi
 
-cargo run --release --bin openbookv2-printer -- --rpc-url  $rpc_url --market CFSMrBssNG8Ud1edW59jNLnq2cwrQ9uY5cM3wXmqRJj3 Aj7ydi3rQ2qz5DnHLZLC91cVsVPmaRu2cUf5ZDfryq3T Gio5iGZF9YVvhX6vwW3fZEfnPhtafseapaseGbAoiH9D DBSZ24hqXS5o8djunrTzBsJUb1P8ZvBs1nng5rmZKsJt Gudvr1FPgxKfnMoEEBXDgXWzmoavTY7nGC9TcdM4s3SP 2ekKD6GQy9CPqyqZyFdERr14JcjD5QcJj7DbFfW23k4W 7iDUNFiwpGjgFW5JmAjhVGXWdBfBXkc9ibFnxUrPNHjM &>> ~/log/trade-reporter-openbookv2.log &
+# RUST_LOG=info  ensure_running $1 "./target/release/openbookv2-printer -- --market $markets --rpc-url $rpc_url --grpc https://spacemonkey.rpcpool.com --x-token 033e7b48-8f8c-439f-a311-d76416646135" ~/log openbook-trades-printer
+# ./target/release/openbookv2-printer -- --market $markets --rpc-url $rpc_url --grpc https://spacemonkey.rpcpool.com --x-token 033e7b48-8f8c-439f-a311-d76416646135
+RUST_LOG=info ensure_running $1 "./target/debug/openbookv2-printer" ~/log openbook-trades-printer

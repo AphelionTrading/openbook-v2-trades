@@ -3,12 +3,10 @@ use crate::name::parse_name;
 use crate::utils::{get_owner_account_for_ooa, price_lots_to_ui, to_native, to_ui_decimals};
 use anchor_lang::__private::base64;
 use anchor_lang::{AnchorDeserialize, AnchorSerialize, Discriminator};
-use clap::Parser;
 use futures::StreamExt;
 use log::{debug, error, info, warn, LevelFilter};
 use openbookv2_generated::state::Market;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_program::clock::UnixTimestamp;
 use solana_program::hash::Hash;
 use solana_program::pubkey::Pubkey;
 use solana_sdk::commitment_config::CommitmentConfig;
@@ -23,79 +21,107 @@ use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::geyser::subscribe_update::UpdateOneof;
 use yellowstone_grpc_proto::geyser::CommitmentLevel;
 use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterTransactions};
+use dotenv::dotenv;
+use env_logger::fmt::Formatter;
+use std::io::Write;
+use chrono;
 
 pub mod constants;
+mod config;
 mod logs;
 mod market;
 mod name;
 mod utils;
 
-#[derive(Parser)]
-struct Cli {
-    #[arg(short, long, default_value = "https://api.mainnet-beta.solana.com")]
-    rpc_url: String,
-    #[arg(short,long, value_delimiter = ' ', num_args = 1..50, default_value = "AFgkED1FUVfBe2trPUDqSqK9QKd4stJrfzq5q1RwAFTa")]
-    // SOL-USDC market default
-    market: Vec<String>,
-    #[arg(short, long, action)]
-    debug: bool,
-    #[arg(short, long, default_value = "8585")]
-    port: String,
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-    #[arg(short, long, default_value = "http://127.0.0.1:10000")]
-    grpc: String,
-    #[clap(value_enum, default_value = "finalized")]
-    commitment: Commitment,
-    #[arg(long, action)]
-    connect: bool,
-    #[arg(short, long, default_value = "x-token")]
-    x_token: String,
-    #[arg(long, default_value_t = 1000)]
-    check: u64,
-}
+use config::{Config, Commitment};
 
-#[derive(clap::ValueEnum, Clone)]
-enum Commitment {
-    Processed,
-    Confirmed,
-    Finalized,
+// Custom logger format that doesn't include the module path
+fn custom_format(
+    buf: &mut Formatter,
+    record: &log::Record,
+) -> std::io::Result<()> {
+    let level = record.level();
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    
+    writeln!(
+        buf,
+        "{} [{}] {}",
+        timestamp,
+        level,
+        record.args()
+    )
 }
 
 // CFSMrBssNG8Ud1edW59jNLnq2cwrQ9uY5cM3wXmqRJj3 DBSZ24hqXS5o8djunrTzBsJUb1P8ZvBs1nng5rmZKsJt 5h4DTiBqZctQWq7xc3H2t8qRdGcFNQNk1DstVNnbJvXs
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
-    if cli.debug {
-        env_logger::builder()
-            .filter_level(LevelFilter::Debug)
-            .init();
-    } else {
-        env_logger::builder().filter_level(LevelFilter::Info).init();
+    // Initialize logger with custom format based on RUST_LOG
+    let log_level = match std::env::var("RUST_LOG") {
+        Ok(level) => {
+            match level.to_lowercase().as_str() {
+                "trace" => LevelFilter::Trace,
+                "debug" => LevelFilter::Debug,
+                "info" => LevelFilter::Info,
+                "warn" => LevelFilter::Warn,
+                "error" => LevelFilter::Error,
+                _ => LevelFilter::Info,
+            }
+        },
+        Err(_) => LevelFilter::Info,
+    };
+    
+    env_logger::builder()
+        .format(custom_format)
+        .filter_level(log_level)
+        .init();
+    
+    // Load configuration from CLI and environment
+    let config = Config::new();
+    
+    // Print configuration in a nicely formatted table
+    info!("╔════════════════════════════════════════════════════════════════════════════╗");
+    info!("║                           CONFIGURATION                                    ║");
+    info!("╠════════════════════════════════════════════════════════════════════════════╣");
+    info!("║ RPC URL:      {:<60} ║", config.rpc_url);
+    info!("║ GRPC URL:     {:<60} ║", config.grpc);
+    info!("║ Host:         {:<60} ║", config.host);
+    info!("║ Port:         {:<60} ║", config.port);
+    info!("║ Commitment:   {:<60} ║", format!("{:?}", config.commitment));
+    info!("║ Connect Mode: {:<60} ║", if config.connect { "Connect" } else { "Bind" });
+    info!("║ X-Token:      {:<60} ║", config.x_token);
+    info!("║ Check:        {:<60} ║", config.check);
+    info!("╠════════════════════════════════════════════════════════════════════════════╣");
+    info!("║ Markets:                                                                   ║");
+    for (i, market_key) in config.market_keys.iter().enumerate() {
+        info!("║  {:<2}: {:<69} ║", i+1, market_key.to_string());
     }
+    info!("╚════════════════════════════════════════════════════════════════════════════╝");
+
+    // Add this before the dotenv() call
+    match std::env::current_dir() {
+        Ok(path) => info!("Current working directory: {:?}", path),
+        Err(e) => info!("Could not determine current directory: {}", e),
+    }
+
     let processed_commitment = CommitmentConfig::processed();
-    let client = RpcClient::new_with_commitment(cli.rpc_url.clone(), processed_commitment);
-    let client_for_slot = RpcClient::new_with_commitment(cli.rpc_url.clone(), processed_commitment);
-    let market_keys = cli
-        .market
-        .iter()
-        .map(|market_key| Pubkey::from_str(market_key).unwrap())
-        .collect::<Vec<Pubkey>>();
-    let accounts = client.get_multiple_accounts(&market_keys).await.unwrap();
+    let client = RpcClient::new_with_commitment(config.rpc_url.clone(), processed_commitment);
+    let client_for_slot = RpcClient::new_with_commitment(config.rpc_url.clone(), processed_commitment);
+    
+    let accounts = client.get_multiple_accounts(&config.market_keys).await.unwrap();
     let mut market_names = BTreeMap::new();
     let mut markets = BTreeMap::new();
     for (idx, option) in accounts.iter().enumerate() {
         let data = option.clone().unwrap().data;
         let market = Market::deserialize(&mut &data[8..]).unwrap();
         let market_name = parse_name(&market.name);
-        market_names.insert(market_keys[idx], market_name.clone());
-        markets.insert(market_keys[idx], market);
-        info!("Polling fills for market: {}", market_name);
+        market_names.insert(config.market_keys[idx], market_name.clone());
+        markets.insert(config.market_keys[idx], market);
+        info!("Subscribing for fills for market: {:<30} Pubkey: {:<10}", market_name.as_str(), &config.market_keys[idx].to_string()[..5]);
     }
 
-    let mut grpc_client = GeyserGrpcClient::build_from_shared(cli.grpc)
+    let mut grpc_client = GeyserGrpcClient::build_from_shared(config.grpc)
         .unwrap()
-        .x_token(Some(cli.x_token.clone()))
+        .x_token(Some(config.x_token.clone()))
         .unwrap()
         .connect()
         .await
@@ -104,7 +130,7 @@ async fn main() {
     info!("{:?}", pong);
 
     let mut transactions = HashMap::new();
-    for key in market_keys.iter() {
+    for key in config.market_keys.iter() {
         let tx_filter = SubscribeRequestFilterTransactions {
             vote: None,
             failed: Some(false),
@@ -115,7 +141,7 @@ async fn main() {
         };
         transactions.insert(key.to_string(), tx_filter);
     }
-    let commitment = match cli.commitment {
+    let commitment = match config.commitment {
         Commitment::Processed => CommitmentLevel::Processed,
         Commitment::Confirmed => CommitmentLevel::Confirmed,
         Commitment::Finalized => CommitmentLevel::Finalized,
@@ -136,9 +162,10 @@ async fn main() {
     let (tx_sender, mut tx_receiver) = unbounded_channel::<(FillLog, String)>();
     let discriminator = FillLog::discriminator();
     let request = request.clone();
+    let check = config.check;
     spawn(async move {
         let mut counter = 0;
-        let mut check = cli.check;
+        let mut check = check;
         'outer: loop {
             let (_subscribe_tx, mut stream) = grpc_client
                 .subscribe_with_request(Some(request.clone()))
@@ -212,9 +239,9 @@ async fn main() {
     });
 
     let ctx = zmq::Context::new();
-    let zero_url = format!("tcp://{}:{}", cli.host, cli.port);
+    let zero_url = format!("tcp://{}:{}", config.host, config.port);
     let socket = ctx.socket(zmq::PUB).unwrap();
-    if cli.connect {
+    if config.connect {
         socket.connect(&zero_url).unwrap()
     } else {
         socket.bind(&zero_url).unwrap();
