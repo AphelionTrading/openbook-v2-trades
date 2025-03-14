@@ -111,12 +111,16 @@ async fn main() {
     let mut market_names = BTreeMap::new();
     let mut markets = BTreeMap::new();
     for (idx, option) in accounts.iter().enumerate() {
-        let data = option.clone().unwrap().data;
-        let market = Market::deserialize(&mut &data[8..]).unwrap();
-        let market_name = parse_name(&market.name);
-        market_names.insert(config.market_keys[idx], market_name.clone());
-        markets.insert(config.market_keys[idx], market);
-        info!("Subscribing for fills for market: {:<30} Pubkey: {:<10}", market_name.as_str(), &config.market_keys[idx].to_string()[..5]);
+        if let Some(account) = option {
+            let data = account.data.clone();
+            let market = Market::deserialize(&mut &data[8..]).unwrap();
+            let market_name = parse_name(&market.name);
+            market_names.insert(config.market_keys[idx], market_name.clone());
+            markets.insert(config.market_keys[idx], market);
+            info!("Subscribing for fills for market: {:<30} Pubkey: {:<10}", market_name.as_str(), &config.market_keys[idx].to_string()[..5]);
+        } else {
+            warn!("Market account not found for pubkey: {}", config.market_keys[idx]);
+        }
     }
 
     let mut grpc_client = GeyserGrpcClient::build_from_shared(config.grpc)
@@ -130,7 +134,7 @@ async fn main() {
     info!("{:?}", pong);
 
     let mut transactions = HashMap::new();
-    for key in config.market_keys.iter() {
+    for key in markets.keys() {
         let tx_filter = SubscribeRequestFilterTransactions {
             vote: None,
             failed: Some(false),
