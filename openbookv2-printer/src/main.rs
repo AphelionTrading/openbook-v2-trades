@@ -171,10 +171,20 @@ async fn main() {
         let mut counter = 0;
         let mut check = check;
         'outer: loop {
-            let (_subscribe_tx, mut stream) = grpc_client
+            // Add error handling for the GRPC client connection
+            let subscribe_result = grpc_client
                 .subscribe_with_request(Some(request.clone()))
-                .await
-                .unwrap();
+                .await;
+                
+            let (_subscribe_tx, mut stream) = match subscribe_result {
+                Ok(result) => result,
+                Err(err) => {
+                    error!("Failed to subscribe to GRPC: {:?}. Retrying in 5 seconds...", err);
+                    sleep(Duration::from_secs(5)).await;
+                    continue 'outer; // Retry the outer loop
+                }
+            };
+            
             loop {
                 let message = stream.next().await;
                 match message {
